@@ -1,34 +1,104 @@
 import telebot
 import json
 import time
+import sqlite3
 from datetime import datetime
 
 # Загрузка конфигурации
 with open('config.json', 'r', encoding='utf-8') as f:
     config = json.load(f)
 token = config['token']
-dev_id = config['dev_id']
+admin_id = config['dev_id']
 
-bot = telebot.TeleBot(token)
-
-# Загрузка данных из JSON
 with open('pre.json', 'r', encoding='utf-8') as f:
     data = json.load(f)
 
+bot = telebot.TeleBot(token)
+
+# Инициализация базы данных SQLite
+db_path = 'bot_database.sqlite3'
+conn = sqlite3.connect(db_path, check_same_thread=False)
+cursor = conn.cursor()
+
+# Создание таблицы пользователей
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS whitelist (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT
+)
+""")
+conn.commit()
+
+# Проверка, находится ли пользователь в вайтлисте
+def is_user_whitelisted(user_id):
+    cursor.execute("SELECT user_id FROM whitelist WHERE user_id = ?", (user_id,))
+    return cursor.fetchone() is not None
+
+# Добавление пользователя в вайтлист
+def add_user_to_whitelist(user_id, username):
+    cursor.execute("INSERT OR IGNORE INTO whitelist (user_id, username) VALUES (?, ?)", (user_id, username))
+    conn.commit()
+
+# Обработка команды /start
 @bot.message_handler(commands=['start'])
 def start_command(message):
+    user_id = message.chat.id
+    username = message.from_user.username or message.from_user.first_name
+    
+    
+    if is_user_whitelisted(user_id):
+        markup = start_menu_markup()
+        bot.send_message(user_id, "Добро пожаловать обратно!", reply_markup=markup)
+    else:
+        bot.send_message(user_id, "Ваш запрос на доступ отправлен администратору.")
+        bot.send_message(admin_id, f"Запрос на добавление в вайтлист от @{username} (ID: {user_id})\n"
+                                    "Для подтверждения введите /approve {user_id} или /reject {user_id}")
 
-    if message.chat.id == 653303971:
-        bot.send_message(message.chat.id, "куку, Миша я знаю твою тестерскую натуру, так что сильно не душни, ахаххаха, кста это сообщение заготовленно только для тебя по твоему телеграм ID ")  # Отправляем сообщение тестеру
+# Команда для подтверждения пользователя
+@bot.message_handler(commands=['approve'])
+def approve_user(message):
+    try:
+        user_id = int(message.text.split()[1])
+        cursor.execute("SELECT username FROM whitelist WHERE user_id = ?", (user_id,))
+        username = cursor.fetchone()
+        if username:
+            bot.send_message(admin_id, "Этот пользователь уже добавлен.")
+            return
 
-    markup = start_menu_markup()
-    bot.send_message(
-        message.chat.id,
-        f"Привет {message.from_user.first_name}... \nя рад что ты всё же решила взглянуть...",
-        reply_markup=markup
-    )
-    bot.send_message(chat_id=7924880320, text=f"Пользователь @{message.from_user.username or message.from_user.first_name} использовал /start")
-    print("ID пользователя, отправившего сообщение:", message.chat.id)
+        add_user_to_whitelist(user_id, "approved_user")
+        bot.send_message(user_id, "Ваш доступ подтвержден! Приятного общения.")
+        bot.send_message(admin_id, f"Пользователь с ID {user_id} добавлен в вайтлист.")
+    except (IndexError, ValueError):
+        bot.send_message(admin_id, "Ошибка: необходимо указать ID пользователя.")
+
+@bot.message_handler(commands=['reject'])
+def reject_user(message):
+    try:
+        user_id = int(message.text.split()[1])
+        bot.send_message(user_id, "К сожалению, ваш запрос отклонен.")
+        bot.send_message(admin_id, f"Пользователь с ID {user_id} отклонен.")
+    except (IndexError, ValueError):
+        bot.send_message(admin_id, "Ошибка: необходимо указать ID пользователя.")
+
+# Обработка ответа админа пользователю
+@bot.message_handler(commands=['reply'])
+def reply_user(message):
+    msg = bot.send_message(admin_id, "Введите ID пользователя, которому нужно ответить:")
+    bot.register_next_step_handler(msg, process_user_id_reply)
+
+def process_user_id_reply(message):
+    try:
+        user_id = int(message.text)
+        msg = bot.send_message(admin_id, "Введите текст сообщения для отправки пользователю:")
+        bot.register_next_step_handler(msg, process_reply_text, user_id)
+    except ValueError:
+        bot.send_message(admin_id, "Ошибка: необходимо указать корректный ID пользователя.")
+
+def process_reply_text(message, user_id):
+    reply_text = message.text
+    bot.send_message(user_id, f"Сообщение от администратора: {reply_text}")
+    bot.send_message(admin_id, f"Сообщение для {user_id} отправлено.")
+
 
 def start_menu_markup():
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -65,6 +135,8 @@ def just_congratulation_handler(message):
 def log_message(message):
     chat_name = message.chat.title if message.chat.type != "private" else "Личные сообщения"
     print(f"[{chat_name}] {message.from_user.first_name}: {message.text}")
+
+
 
 # Запуск бота
 if __name__ == "__main__":
